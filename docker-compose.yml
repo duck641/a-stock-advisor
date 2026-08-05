@@ -1,0 +1,47 @@
+# ═══════════════════════════════════════════
+# A_stock Agent — Docker Compose
+#
+# 启动所有服务：
+#   docker compose up -d
+#
+# 查看日志：
+#   docker compose logs -f
+#
+# 停止：
+#   docker compose down
+# ═══════════════════════════════════════════
+
+services:
+
+  # ─── Web 前端（浏览器访问 localhost:8000）───
+  web:
+    build: .
+    user: "1001:1001"
+    command: python3 wechat/server.py
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./cron/reports:/app/cron/reports
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ─── 定时日报（每天 09:00 生成板块分析）───
+  cron:
+    build: .
+    user: "1001:1001"
+    command: python3 cron/cron.py
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./cron/reports:/app/cron/reports
+    env_file:
+      - .env
+    restart: unless-stopped

@@ -1,0 +1,30 @@
+# ── Python ────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+*.egg
+
+# ── 密钥 & 配置 ─────────────────────────
+.env
+
+# ── 运行时产物 ───────────────────────────
+data/
+logs/
+nohup.out
+cron/reports/
+cron/*.log
+cron/cron.sh
+
+# ── IDE ──────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ───────────────────────────────────
+.DS_Store
+Thumbs.db
