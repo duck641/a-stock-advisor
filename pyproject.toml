@@ -18,10 +18,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Office/Business :: Financial :: Investment",
 ]
+urls = {Repository = "https://github.com/duck641/a-stock-advisor", Issues = "https://github.com/yourname/a-stock-advisor/issues"}
 
-[project.urls]
-Repository = "https://github.com/yourname/a-stock-advisor"
-Issues = "https://github.com/yourname/a-stock-advisor/issues"
 dependencies = [
     "akshare>=1.14.0",
     "pandas>=2.0.0",
