@@ -14,6 +14,39 @@
 
 ## 快速开始
 
+### Windows（PowerShell / CMD）
+
+需要 Python 3.11 或以上版本（本机使用 Python 3.12）。在本 README 所在目录打开终端：
+
+```powershell
+# 首次安装 / 按 uv.lock 同步依赖
+.\windows.cmd install
+
+# 配置模型（已有 .env 时可跳过）
+.\windows.cmd setup
+
+# Web 界面：http://localhost:8000
+.\windows.cmd web
+
+# 终端对话
+.\windows.cmd chat
+
+# 每天 09:00 生成日报，终端需保持运行，使用本机时区
+.\windows.cmd cron
+
+# 立即生成日报（会调用模型和行情服务）
+.\windows.cmd cron --now
+
+# 立即刷新大盘环境和90个行业的轮动状态
+.\windows.cmd refresh
+```
+
+双击 `windows.cmd` 默认启动 Web 服务，按 Ctrl+C 停止。脚本自动切换到项目目录并启用 UTF-8，无需激活环境或修改 PowerShell 执行策略。
+
+Windows 使用独立的 `.venv-windows`，从 Ubuntu 复制来的 `.venv` 不能在 Windows 使用。安装不会覆盖已有 `.env`。IDE 的 Python 解释器请选择 `.venv-windows\Scripts\python.exe`。首次安装需要联网；模型对话需要有效的 API 配置，行情工具需要能访问外部数据源。
+
+以下为 Linux / Ubuntu 的原有安装方式。
+
 ### 1. 环境要求
 
 - Python ≥ 3.11
@@ -52,6 +85,9 @@ cp .env.example .env
 
 # 定时日报（立即生成一次）
 .venv/bin/python3 cli.py cron --now
+
+# 刷新市场和板块轮动状态
+.venv/bin/python3 cli.py refresh
 ```
 
 ## 使用方式
@@ -73,7 +109,7 @@ cp .env.example .env
 
 ### 定时日报
 
-每天早上 09:00 自动分析板块并生成 Markdown 报告到 `cron/reports/YYYY-MM-DD.md`。
+每天早上 09:00 先更新大盘和行业轮动状态，再生成结构化 Markdown 日报到 `cron/reports/YYYY-MM-DD.md`。
 
 ## 项目结构
 

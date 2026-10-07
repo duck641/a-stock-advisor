@@ -6,6 +6,7 @@
 
 from langchain_core.tools import tool
 from datetime import datetime
+import math
 
 
 # ════════════════════════════════════════════════
@@ -26,23 +27,35 @@ def _score_to_rating(score: float) -> str:
         return "建议卖出"
 
 
-def _check_fundamental(fundamental: dict) -> tuple[float, list[str]]:
+def _to_float(value) -> float | None:
+    """解析真实数值；None、N/A、空字符串和 NaN 都视为缺失。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).replace(",", "").replace("%", "").strip())
+    except (ValueError, TypeError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _check_fundamental(fundamental: dict) -> tuple[float, list[str], int]:
     """
-    评估基本面，返回 (得分, 理由列表)
+    评估基本面，返回 (得分, 理由列表, 有效指标数)
 
     输入来自 get_fundamental_info 的返回
     """
     score = 50  # 基础分
     reasons = []
+    valid_count = 0
 
     profitability = fundamental.get("盈利能力", {})
     growth = fundamental.get("盈利成长性", {})
     finance = fundamental.get("财务状况", {})
 
     # 盈利能力评分
-    roe = profitability.get("净资产收益率", "0%")
-    try:
-        roe_val = float(roe.replace("%", ""))
+    roe_val = _to_float(profitability.get("净资产收益率"))
+    if roe_val is not None:
+        valid_count += 1
         if roe_val > 15:
             score += 15
             reasons.append(f"ROE({roe_val:.1f}%)优秀，盈利能力强劲")
@@ -55,12 +68,10 @@ def _check_fundamental(fundamental: dict) -> tuple[float, list[str]]:
         else:
             score -= 15
             reasons.append(f"ROE({roe_val:.1f}%)为负，盈利能力堪忧")
-    except (ValueError, TypeError):
-        pass
 
-    net_profit_rate = profitability.get("销售净利率", "0%")
-    try:
-        npr = float(net_profit_rate.replace("%", ""))
+    npr = _to_float(profitability.get("销售净利率"))
+    if npr is not None:
+        valid_count += 1
         if npr > 15:
             score += 10
             reasons.append(f"净利率({npr:.1f}%)较高")
@@ -69,14 +80,11 @@ def _check_fundamental(fundamental: dict) -> tuple[float, list[str]]:
         elif npr <= 0:
             score -= 10
             reasons.append("净利率为负或极低")
-    except (ValueError, TypeError):
-        pass
 
     # 成长性评分
-    revenue_growth = growth.get("主营业务收入增长率", "0%")
-    profit_growth = growth.get("净利润增长率", "0%")
-    try:
-        rg = float(revenue_growth.replace("%", ""))
+    rg = _to_float(growth.get("主营业务收入增长率"))
+    if rg is not None:
+        valid_count += 1
         if rg > 20:
             score += 10
             reasons.append(f"营收增长({rg:.1f}%)快速增长")
@@ -85,11 +93,10 @@ def _check_fundamental(fundamental: dict) -> tuple[float, list[str]]:
         elif rg < 0:
             score -= 5
             reasons.append("营收负增长")
-    except (ValueError, TypeError):
-        pass
 
-    try:
-        pg = float(profit_growth.replace("%", ""))
+    pg = _to_float(growth.get("净利润增长率"))
+    if pg is not None:
+        valid_count += 1
         if pg > 20:
             score += 10
             reasons.append(f"净利润增长({pg:.1f}%)高速增长")
@@ -98,13 +105,11 @@ def _check_fundamental(fundamental: dict) -> tuple[float, list[str]]:
         elif pg < 0:
             score -= 10
             reasons.append(f"净利润下滑({pg:.1f}%)")
-    except (ValueError, TypeError):
-        pass
 
     # 财务健康
-    debt_ratio = finance.get("资产负债率", "0%")
-    try:
-        dr = float(debt_ratio.replace("%", ""))
+    dr = _to_float(finance.get("资产负债率"))
+    if dr is not None:
+        valid_count += 1
         if dr < 30:
             score += 5
             reasons.append(f"资产负债率({dr:.1f}%)较低，财务稳健")
@@ -113,41 +118,38 @@ def _check_fundamental(fundamental: dict) -> tuple[float, list[str]]:
             reasons.append(f"资产负债率({dr:.1f}%)过高，财务风险大")
         else:
             score += 2
-    except (ValueError, TypeError):
-        pass
 
-    current_ratio = finance.get("流动比率", 0)
-    try:
-        cr = float(current_ratio)
+    cr = _to_float(finance.get("流动比率"))
+    if cr is not None:
+        valid_count += 1
         if cr > 2:
             score += 5
             reasons.append("流动性充裕")
         elif cr < 1:
             score -= 5
             reasons.append(f"流动比率({cr:.2f})偏低，短期偿债压力大")
-    except (ValueError, TypeError):
-        pass
 
-    return score, reasons
+    return score, reasons, valid_count
 
 
-def _check_technical(technical: dict) -> tuple[float, list[str]]:
+def _check_technical(technical: dict) -> tuple[float, list[str], int]:
     """
-    评估技术面，返回 (得分, 理由列表)
+    评估技术面，返回 (得分, 理由列表, 有效指标数)
 
     输入来自 get_technical_info 的返回
     """
     score = 50
     reasons = []
+    valid_count = 0
 
     signals = technical.get("买卖信号", {})
     trend_data = technical.get("价格趋势", {})
     vol_data = technical.get("量价关系", {})
 
     # RSI 评分
-    rsi = signals.get("RSI", 50)
-    try:
-        rsi = float(rsi)
+    rsi = _to_float(signals.get("RSI"))
+    if rsi is not None:
+        valid_count += 1
         if rsi < 30:
             score += 20
             reasons.append(f"RSI({rsi:.1f})超卖，存在反弹机会")
@@ -163,11 +165,11 @@ def _check_technical(technical: dict) -> tuple[float, list[str]]:
         else:
             score += 5
             reasons.append(f"RSI({rsi:.1f})处于正常区间")
-    except (ValueError, TypeError):
-        pass
 
     # MACD 评分
     macd_signal = signals.get("MACD信号", "")
+    if macd_signal:
+        valid_count += 1
     if "金叉" in str(macd_signal):
         score += 15
         reasons.append("MACD金叉，买入信号")
@@ -183,6 +185,8 @@ def _check_technical(technical: dict) -> tuple[float, list[str]]:
 
     # 趋势评分
     trend = str(trend_data.get("趋势方向", ""))
+    if trend:
+        valid_count += 1
     if "上涨" in trend:
         score += 10
         reasons.append("短期趋势向上")
@@ -192,6 +196,8 @@ def _check_technical(technical: dict) -> tuple[float, list[str]]:
 
     # 量价评分
     vol_signal = str(vol_data.get("量价信号", ""))
+    if vol_signal:
+        valid_count += 1
     if "上涨有效" in vol_signal:
         score += 10
         reasons.append("价涨量增，上涨有效")
@@ -206,22 +212,22 @@ def _check_technical(technical: dict) -> tuple[float, list[str]]:
         reasons.append("价跌量缩，下跌动能减弱")
 
     # 均线形态
-    ma = trend_data.get("MA5", 0)
-    ma20 = trend_data.get("MA20", 0)
-    ma60 = trend_data.get("MA60", 0)
-    try:
-        ma_f, ma20_f, ma60_f = float(ma), float(ma20), float(ma60)
-        if ma60 and ma_f > ma20_f > ma60_f:
+    ma_f = _to_float(trend_data.get("MA5"))
+    ma20_f = _to_float(trend_data.get("MA20"))
+    ma60_f = _to_float(trend_data.get("MA60"))
+    if None not in (ma_f, ma20_f, ma60_f):
+        valid_count += 1
+        if ma_f > ma20_f > ma60_f:
             score += 10
             reasons.append("均线多头排列")
-        elif ma60 and ma_f < ma20_f < ma60_f:
+        elif ma_f < ma20_f < ma60_f:
             score -= 10
             reasons.append("均线空头排列")
-    except (ValueError, TypeError):
-        pass
 
     # 布林带位置
     boll_signal = str(signals.get("布林信号", ""))
+    if boll_signal:
+        valid_count += 1
     if "超卖" in boll_signal:
         score += 8
         reasons.append("触及布林下轨，超卖")
@@ -229,25 +235,26 @@ def _check_technical(technical: dict) -> tuple[float, list[str]]:
         score -= 8
         reasons.append("触及布林上轨，超买")
 
-    return score, reasons
+    return score, reasons, valid_count
 
 
-def _check_valuation(fundamental: dict) -> tuple[float, list[str]]:
+def _check_valuation(fundamental: dict) -> tuple[float, list[str], int]:
     """
-    评估估值，返回 (得分, 理由列表)
+    评估估值，返回 (得分, 理由列表, 有效指标数)
 
     输入来自 get_fundamental_info 的返回
     """
     score = 50
     reasons = []
+    valid_count = 0
 
     valuation = fundamental.get("估值指标", {})
 
     # 市盈率判断
-    pe = valuation.get("市盈率", None)
-    if pe:
-        try:
-            pe_val = float(pe)
+    pe_val = _to_float(valuation.get("市盈率"))
+    if pe_val is not None:
+        valid_count += 1
+        if pe_val > 0:
             if pe_val < 15:
                 score += 15
                 reasons.append(f"市盈率({pe_val:.1f})较低，估值合理")
@@ -260,14 +267,14 @@ def _check_valuation(fundamental: dict) -> tuple[float, list[str]]:
             else:
                 score -= 10
                 reasons.append(f"市盈率({pe_val:.1f})过高，估值泡沫风险")
-        except (ValueError, TypeError):
-            pass
+        else:
+            reasons.append("市盈率为负或零，不适合按常规市盈率估值")
 
     # 市净率判断
-    pb = valuation.get("市净率", None)
-    if pb:
-        try:
-            pb_val = float(pb)
+    pb_val = _to_float(valuation.get("市净率"))
+    if pb_val is not None:
+        valid_count += 1
+        if pb_val > 0:
             if pb_val < 1.5:
                 score += 10
                 reasons.append(f"市净率({pb_val:.2f})较低")
@@ -276,20 +283,16 @@ def _check_valuation(fundamental: dict) -> tuple[float, list[str]]:
             elif pb_val > 5:
                 score -= 5
                 reasons.append(f"市净率({pb_val:.2f})偏高")
-        except (ValueError, TypeError):
-            pass
 
     # 市销率
-    ps = valuation.get("市销率", None)
-    if ps:
-        try:
-            ps_val = float(ps)
+    ps_val = _to_float(valuation.get("市销率"))
+    if ps_val is not None:
+        valid_count += 1
+        if ps_val > 0:
             if ps_val < 2:
                 score += 5
-        except (ValueError, TypeError):
-            pass
 
-    return score, reasons
+    return score, reasons, valid_count
 
 
 # ════════════════════════════════════════════════
@@ -319,7 +322,8 @@ def generate_trade_signal(
         technical: get_technical_info 的返回结果（字典）
 
     返回:
-        字典包含综合评分、操作建议、详细理由
+        字典包含数据完整度、结论可信度、综合评分、操作建议和详细理由。
+        核心数据不足时不生成买卖或仓位建议。
     """
     result = {
         "股票代码": stock_num or "未知",
@@ -327,44 +331,96 @@ def generate_trade_signal(
         "分析时间": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
 
-    all_reasons = []
-    total_score = 50  # 基础分
-    weights = {"fundamental": 0.35, "technical": 0.40, "valuation": 0.25}
+    fundamental = fundamental if isinstance(fundamental, dict) else {}
+    technical = technical if isinstance(technical, dict) else {}
+    all_reasons: list[str] = []
+    base_weights = {"fundamental": 0.35, "technical": 0.40, "valuation": 0.25}
+    expected_counts = {"fundamental": 6, "technical": 6, "valuation": 3}
 
-    # 1. 基本面评分
-    if fundamental:
-        f_score, f_reasons = _check_fundamental(fundamental)
-        total_score += (f_score - 50) * weights["fundamental"]
-        all_reasons.extend(f_reasons)
-        result["基本面评分"] = round(f_score, 1)
-        result["基本面评价"] = _score_to_rating(f_score)
+    # 每个评分函数同时返回有效指标数量。空字典和只有错误信息的字典不会再得到默认 50 分。
+    f_score, f_reasons, f_count = _check_fundamental(fundamental)
+    t_score, t_reasons, t_count = _check_technical(technical)
+    v_score, v_reasons, v_count = _check_valuation(fundamental)
+    all_reasons.extend(f_reasons + t_reasons + v_reasons)
+
+    component_scores = {
+        "fundamental": (f_score, f_count),
+        "technical": (t_score, t_count),
+        "valuation": (v_score, v_count),
+    }
+    component_labels = {
+        "fundamental": "基本面",
+        "technical": "技术面",
+        "valuation": "估值",
+    }
+    minimum_for_rating = {"fundamental": 3, "technical": 3, "valuation": 2}
+
+    for name, (score, count) in component_scores.items():
+        label = component_labels[name]
+        result[f"{label}有效指标"] = f"{count}/{expected_counts[name]}"
+        result[f"{label}评分"] = round(score, 1) if count else None
+        result[f"{label}评价"] = (
+            _score_to_rating(score)
+            if count >= minimum_for_rating[name]
+            else "样本不足"
+        )
+
+    valid_count = sum(count for _score, count in component_scores.values())
+    expected_total = sum(expected_counts.values())
+    completeness = valid_count / expected_total
+    missing_data = [
+        f"{component_labels[name]}缺少 {expected_counts[name] - count} 项指标"
+        for name, (_score, count) in component_scores.items()
+        if count < expected_counts[name]
+    ]
+    result["有效指标数"] = f"{valid_count}/{expected_total}"
+    result["数据完整度"] = f"{completeness:.0%}"
+    result["缺失数据"] = missing_data
+
+    # 只对实际有数据的维度重新分配权重，缺失维度不会再用中性 50 分稀释结果。
+    available_weight = sum(
+        base_weights[name]
+        for name, (_score, count) in component_scores.items()
+        if count > 0
+    )
+    if available_weight:
+        actual_weights = {
+            name: base_weights[name] / available_weight
+            for name, (_score, count) in component_scores.items()
+            if count > 0
+        }
+        reference_score = sum(
+            component_scores[name][0] * weight
+            for name, weight in actual_weights.items()
+        )
     else:
-        all_reasons.append("未提供基本面数据，评分中性")
-        result["基本面评分"] = 50
+        actual_weights = {}
+        reference_score = None
 
-    # 2. 技术面评分
-    if technical:
-        t_score, t_reasons = _check_technical(technical)
-        total_score += (t_score - 50) * weights["technical"]
-        all_reasons.extend(t_reasons)
-        result["技术面评分"] = round(t_score, 1)
-        result["技术面评价"] = _score_to_rating(t_score)
-    else:
-        all_reasons.append("未提供技术面数据，评分中性")
-        result["技术面评分"] = 50
+    result["实际权重"] = {
+        component_labels[name]: f"{weight:.0%}"
+        for name, weight in actual_weights.items()
+    }
 
-    # 3. 估值评分
-    if fundamental:
-        v_score, v_reasons = _check_valuation(fundamental)
-        total_score += (v_score - 50) * weights["valuation"]
-        all_reasons.extend(v_reasons)
-        result["估值评分"] = round(v_score, 1)
-        result["估值评价"] = _score_to_rating(v_score)
-    else:
-        result["估值评分"] = 50
+    # 交易建议至少需要一半指标有效，并且技术面不能少于三项。
+    sufficient = completeness >= 0.5 and t_count >= 3
+    confidence = "高" if completeness >= 0.8 and t_count >= 4 else "中" if sufficient else "低"
+    result["结论可信度"] = confidence
 
-    # 4. 综合判断
-    total_score = min(max(total_score, 0), 100)  # 限制在 0-100
+    if not sufficient:
+        result["参考评分"] = round(reference_score, 1) if reference_score is not None else None
+        result["综合评分"] = None
+        result["操作建议"] = "数据不足，暂不判断"
+        result["建议仓位"] = "不建议基于当前数据操作"
+        result["主要理由"] = [
+            f"仅取得 {valid_count}/{expected_total} 项有效指标，或技术面数据不足",
+            *missing_data,
+        ][:8]
+        result["综合摘要"] = "数据不足，无法形成可靠的买卖结论"
+        return result
+
+    # 只有数据达到最低门槛后，才生成综合评级和仓位建议。
+    total_score = min(max(reference_score, 0), 100)
     result["综合评分"] = round(total_score, 1)
     result["操作建议"] = _score_to_rating(total_score)
 
@@ -380,13 +436,11 @@ def generate_trade_signal(
     result["主要理由"] = all_reasons[:8]  # 最多8条
 
     # 5. 一句话总结
-    summary_parts = []
-    if fundamental:
-        summary_parts.append(f"基本面{result['基本面评价']}")
-    if technical:
-        summary_parts.append(f"技术面{result['技术面评价']}")
-    if fundamental:
-        summary_parts.append(f"估值{result['估值评价']}")
+    summary_parts = [
+        f"{component_labels[name]}{result[f'{component_labels[name]}评价']}"
+        for name, (_score, count) in component_scores.items()
+        if count > 0
+    ]
 
     summary = f"综合{result['操作建议']}（{result['综合评分']}分）"
     if summary_parts:

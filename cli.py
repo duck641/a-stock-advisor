@@ -6,9 +6,11 @@ A_stock CLI — 统一命令行入口
   a-stock web          Web UI（http://localhost:8000）
   a-stock cron         定时日报（后台常驻）
   a-stock cron --now   立即生成一次日报
+  a-stock refresh      立即更新大盘和行业轮动状态
 """
 
 import argparse
+import os
 import sys
 
 
@@ -27,7 +29,9 @@ def cmd_web():
     """FastAPI + WebSocket Web UI"""
     import uvicorn
     from wechat.server import app
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 默认只监听本机，避免没有登录机制的个人对话和股票数据暴露到局域网。
+    host = os.getenv("A_STOCK_WEB_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=8000)
 
 
 def cmd_cron(now: bool = False):
@@ -35,7 +39,8 @@ def cmd_cron(now: bool = False):
     if now:
         # 立即执行一次后退出
         from cron.cron import generate_report
-        generate_report()
+        if not generate_report():
+            raise SystemExit(1)
     else:
         # 后台常驻（每天 09:00 执行）
         import time
@@ -55,6 +60,20 @@ def cmd_setup():
     """交互式配置向导"""
     from setup_wizard import run_setup
     run_setup()
+
+
+def cmd_refresh():
+    """立即更新大盘环境和全部行业板块状态。"""
+    from cron.cron import refresh_rotation_data
+
+    result = refresh_rotation_data()
+    market = result["market"]
+    sectors = result["sectors"]
+    print(
+        f"市场状态：{market['confirmed_regime']}（{market['trade_date']}）\n"
+        f"板块状态：{sectors['trade_date']}，覆盖率 {sectors['coverage']:.1%}\n"
+        f"状态数量：{sectors.get('state_counts', {})}"
+    )
 
 
 def main():
@@ -80,6 +99,9 @@ def main():
     # setup
     sub.add_parser("setup", help="交互式配置向导（切换模型/设置 API Key）")
 
+    # refresh
+    sub.add_parser("refresh", help="立即更新大盘环境和行业板块状态")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -94,6 +116,8 @@ def main():
         cmd_cron(now=args.now)
     elif args.command == "setup":
         cmd_setup()
+    elif args.command == "refresh":
+        cmd_refresh()
 
 
 if __name__ == "__main__":

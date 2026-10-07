@@ -67,8 +67,9 @@ def classify_error(e: Exception, tool_name: str, tool_args: dict) -> ErrorCatego
     if isinstance(e, ValueError):
         return ErrorCategory.ARGUMENT
 
+    # KeyError 多数来自上游数据字段变化或工具实现，不是用户修改参数能解决的问题。
     if isinstance(e, KeyError):
-        return ErrorCategory.ARGUMENT
+        return ErrorCategory.FATAL
 
     if "invalid" in error_str and ("code" in error_str or "param" in error_str):
         return ErrorCategory.ARGUMENT
@@ -99,8 +100,8 @@ def classify_error(e: Exception, tool_name: str, tool_args: dict) -> ErrorCatego
     if "not found" in error_str and "stock" in error_str:
         return ErrorCategory.ARGUMENT
 
-    # 默认：临时错误（安全起见，宁可重试也别直接放弃）
-    return ErrorCategory.RETRYABLE
+    # 未识别异常通常是工具实现或上游数据结构变化，重复调用只会浪费时间。
+    return ErrorCategory.FATAL
 
 
 def execute_with_error_handling(

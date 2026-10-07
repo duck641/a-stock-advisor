@@ -6,22 +6,84 @@ A_stock Agent — FastAPI + WebSocket 服务（前端 + 后端）
 
 浏览器打开 http://localhost:8000
 """
-import sys, os, json, uuid, re
+import asyncio
+import logging
+import sys, os, re
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-from agent import agent, summary_llm
+from agent import AGENT_RUN_CONFIG, LLMServiceUnavailableError, agent, summary_llm
 from config import config
-from memory import ChatStorage, estimate_tokens, compress_history
+from memory import ChatStorage, prepare_history_for_agent
 
 app = FastAPI(title="A_stock 分析助手")
+# Web UI 只设计为本机应用；校验 Host 可阻止浏览器借恶意域名访问本机服务。
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"],
+)
 
 _COMPRESSION_AT = config.context_window * config.compression_ratio
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+logger = logging.getLogger(__name__)
+
+
+def _is_local_origin(origin: str | None) -> bool:
+    """仅接受本机页面发起的浏览器 WebSocket 连接。"""
+    if not origin:
+        return True  # 非浏览器本机客户端通常不发送 Origin。
+    try:
+        return urlparse(origin).hostname in {"localhost", "127.0.0.1", "::1"}
+    except ValueError:
+        return False
+
+
+async def _agent_updates(history: list):
+    """在线程中运行同步 LangGraph，并通过异步队列逐块交还结果。
+
+    Agent 与多数行情工具都是同步接口。把它们直接放进 async 端点会冻结
+    FastAPI 事件循环，使其他连接无法收发消息。
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def run_sync_agent():
+        try:
+            for chunk in agent.stream(
+                {"messages": history},
+                config=AGENT_RUN_CONFIG,
+                stream_mode="updates",
+            ):
+                loop.call_soon_threadsafe(queue.put_nowait, ("chunk", chunk))
+        except BaseException as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+
+    worker = asyncio.create_task(asyncio.to_thread(run_sync_agent))
+    worker_error = None
+    try:
+        while True:
+            kind, payload = await queue.get()
+            if kind == "chunk":
+                yield payload
+            elif kind == "error":
+                worker_error = payload
+            else:
+                break
+    finally:
+        # 等待线程收尾，但等待本身不会阻塞其他 WebSocket 连接。
+        await worker
+
+    if worker_error is not None:
+        raise worker_error
 
 
 # ═══════════════════════════════════════════
@@ -592,6 +654,11 @@ connect();
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(ws: WebSocket, session_id: str):
+    # session_id 会进入数据库；限制格式可以避免任意标识持续污染本地存储。
+    if not _SESSION_ID_RE.fullmatch(session_id) or not _is_local_origin(ws.headers.get("origin")):
+        await ws.close(code=1008)
+        return
+
     await ws.accept()
     storage = ChatStorage()
 
@@ -600,70 +667,87 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
             data = await ws.receive_json()
             if data.get("type") != "message":
                 continue
-            text = data["content"]
+            try:
+                text = str(data.get("content", "")).strip()
+                if not text:
+                    continue
+                if len(text) > 20_000:
+                    raise ValueError("单次输入不能超过 20000 个字符")
 
-            # 确保对话存在（用 session_id 作为对话 ID）
-            conv = storage.get_conversation(session_id)
-            if not conv:
-                with storage._connect() as conn:
-                    conn.execute(
-                        "INSERT INTO conversations (id, title) VALUES (?, ?)",
-                        (session_id, "新对话"),
+                # 系统提示可先保存，但用户消息要等完整回答生成后再一起提交。
+                conv = storage.get_conversation(session_id)
+                if not conv:
+                    with storage._connect() as conn:
+                        conn.execute(
+                            "INSERT INTO conversations (id, title) VALUES (?, ?)",
+                            (session_id, "新对话"),
+                        )
+                    from prompts import build_react_system_prompt
+                    sp = build_react_system_prompt(
+                        role="analyst",
+                        include_rules=["base", "risk", "stock_resolve"],
+                        include_skills=["trend", "indicator", "volume"],
                     )
-                # 首次创建：写入 system prompt
-                from prompts import build_react_system_prompt
-                sp = build_react_system_prompt(
-                    role="analyst",
-                    include_rules=["base", "risk", "stock_resolve"],
-                    include_skills=["trend", "indicator", "volume"],
+                    storage.save_message(session_id, SystemMessage(content=sp))
+                    conv = storage.get_conversation(session_id)
+
+                history = storage.get_messages(session_id)
+                user_msg = HumanMessage(content=text)
+                candidate_history = [*history, user_msg]
+                prepared_history, was_compressed = prepare_history_for_agent(
+                    candidate_history,
+                    summary_llm,
+                    compression_at=int(_COMPRESSION_AT),
+                    context_window=config.context_window,
+                    response_reserve=config.max_tokens,
                 )
-                storage.save_message(session_id, SystemMessage(content=sp))
 
-            history = storage.get_messages(session_id)
+                new_msgs = []
+                async for chunk in _agent_updates(prepared_history):
+                    for node_name, value in chunk.items():
+                        if not isinstance(value, dict) or "messages" not in value:
+                            continue
+                        for msg in value["messages"]:
+                            new_msgs.append(msg)
+                            if isinstance(msg, AIMessage) and msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    await ws.send_json({
+                                        "type": "tool", "content": f"{tc['name']}(...)"
+                                    })
+                            elif isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
+                                await ws.send_json({"type": "token", "content": msg.content})
 
-            user_msg = HumanMessage(content=text)
-            storage.save_message(session_id, user_msg)
-            history.append(user_msg)
+                # 没有最终回答时，工具调用链仍是不完整的，整轮都不保存。
+                has_final_answer = any(
+                    isinstance(msg, AIMessage) and msg.content and not msg.tool_calls
+                    for msg in new_msgs
+                )
+                if not has_final_answer:
+                    raise RuntimeError("Agent 未返回最终回答，请重试")
 
-            # 第一条用户消息 → 自动设为对话标题
-            if conv and conv.get("title") == "新对话":
-                title = text[:30] + ("..." if len(text) > 30 else "")
-                storage.update_title(session_id, title)
+                complete_history = [*prepared_history, *new_msgs]
+                if was_compressed:
+                    storage.replace_all_messages(session_id, complete_history)
+                else:
+                    storage.save_messages(session_id, [user_msg, *new_msgs])
 
-            new_msgs = []
-            full_reply = ""
+                if conv and conv.get("title") == "新对话":
+                    title = text[:30] + ("..." if len(text) > 30 else "")
+                    storage.update_title(session_id, title)
 
-            for chunk in agent.stream({"messages": history}, stream_mode="updates"):
-                for node_name, value in chunk.items():
-                    if not isinstance(value, dict) or "messages" not in value:
-                        continue
-                    for msg in value["messages"]:
-                        new_msgs.append(msg)
-                        if isinstance(msg, AIMessage) and msg.tool_calls:
-                            for tc in msg.tool_calls:
-                                await ws.send_json({"type": "tool", "content": f"{tc['name']}(...)"})
-                        elif isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
-                            await ws.send_json({"type": "token", "content": msg.content})
-                            full_reply += msg.content
-
-            if new_msgs:
-                storage.save_messages(session_id, new_msgs)
-                history.extend(new_msgs)
-
-            # 历史压缩：整替换 DB，避免旧消息残留
-            if estimate_tokens(history) > _COMPRESSION_AT:
-                history = compress_history(history, summary_llm)
-                storage.replace_all_messages(session_id, history)
-
-            await ws.send_json({"type": "done"})
+                await ws.send_json({"type": "done"})
+            except WebSocketDisconnect:
+                raise
+            except LLMServiceUnavailableError as exc:
+                # Agent 已完成重试，Web 端返回简短错误并保持连接可继续使用。
+                logger.error("Web 对话执行失败: %s", exc)
+                await ws.send_json({"type": "error", "content": str(exc)})
+            except Exception as exc:
+                logger.exception("Web 对话执行失败")
+                await ws.send_json({"type": "error", "content": str(exc)})
 
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        try:
-            await ws.send_json({"type": "error", "content": str(e)})
-        except Exception:
-            pass
 
 
 # ═══════════════════════════════════════════
@@ -746,4 +830,5 @@ async def index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 本机直接运行时保持仅本地可访问；Docker 会显式覆盖监听地址。
+    uvicorn.run(app, host=os.getenv("A_STOCK_WEB_HOST", "127.0.0.1"), port=8000)

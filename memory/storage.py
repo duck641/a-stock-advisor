@@ -78,7 +78,8 @@ def _row_to_msg(row: dict):
     role = row["role"]
 
     if role == "system":
-        return SystemMessage(content=row["content"] or "")
+        # 摘要的身份标记也要恢复，否则重启后只能依赖正文前缀识别摘要。
+        return SystemMessage(content=row["content"] or "", name=row.get("name") or None)
 
     if role == "human":
         return HumanMessage(content=row["content"] or "")
@@ -232,7 +233,28 @@ class ChatStorage:
             return cur.lastrowid
 
     def save_messages(self, conv_id: str, msgs: list) -> list[int]:
-        return [self.save_message(conv_id, m) for m in msgs]
+        """在同一个事务中保存一组消息。
+
+        一轮对话的用户消息、工具消息和最终回答必须一起提交；其中任何一条
+        写入失败时整轮回滚，数据库里就不会留下无法继续的半轮对话。
+        """
+        ids = []
+        with self._connect() as conn:
+            for msg in msgs:
+                row = _msg_to_row(msg)
+                cur = conn.execute(
+                    """INSERT INTO messages
+                       (conversation_id, role, content, tool_calls, tool_call_id, name)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (conv_id, row["role"], row["content"], row["tool_calls"],
+                     row["tool_call_id"], row["name"]),
+                )
+                ids.append(cur.lastrowid)
+            conn.execute(
+                "UPDATE conversations SET updated_at=datetime('now','localtime') WHERE id=?",
+                (conv_id,),
+            )
+        return ids
 
     def replace_all_messages(self, conv_id: str, messages: list):
         """原子替换对话的全部消息（压缩后将 DB 同步到内存状态）

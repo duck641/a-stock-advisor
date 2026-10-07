@@ -10,6 +10,7 @@ from memory.history import (
     ConversationMemory,
     estimate_tokens,
     compress_history,
+    prepare_history_for_agent,
     split_turns,
     KEEP_TURNS,
 )

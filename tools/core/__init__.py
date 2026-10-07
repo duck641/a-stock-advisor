@@ -17,12 +17,12 @@ from tools.core.tools_manage import (
 )
 from tools.core.skill_manager import (
     load_skill,
+    load_skill_ref,
     list_skills,
 )
 
 __all__ = [
     "concurrent_tool_node",
-    "can_concurrent",
     "execute_with_error_handling",
     "classify_error",
     "format_error_for_llm",
@@ -33,6 +33,6 @@ __all__ = [
     "quick_call",
     "summary",
     "load_skill",
+    "load_skill_ref",
     "list_skills",
-    "save_skill",
 ]

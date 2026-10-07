@@ -50,7 +50,17 @@ target-version = "py311"
 package = true
 
 [tool.setuptools]
-py-modules = ["agent", "chat", "cli", "config", "prompts", "logging_config", "setup_wizard"]
+# 这些文件是项目根目录中的独立 Python 模块，必须显式列出才能随项目一起安装。
+py-modules = [
+    "agent",
+    "chat",
+    "cli",
+    "cli_ui",
+    "config",
+    "prompts",
+    "logging_config",
+    "setup_wizard",
+]
 
 [tool.setuptools.packages.find]
 exclude = ["data*", "logs*"]

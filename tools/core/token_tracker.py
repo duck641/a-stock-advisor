@@ -55,10 +55,11 @@ class TokenTracker(BaseCallbackHandler):
         )
 
     def on_llm_error(self, error, *, run_id, **kwargs):
-        """LLM 调用错误"""
+        """记录单次 LLM 调用错误；是否重试由 Agent 统一决定。"""
         self._start_times.pop(run_id, None)
         self._models.pop(run_id, None)
-        logger.error("LLM 调用失败: %s", error)
+        # 单次失败可能马上自动恢复，避免在终端提前显示成最终故障。
+        logger.debug("单次 LLM 调用失败: %s", error)
 
     def get_stats(self) -> dict:
         """获取本轮累积统计"""

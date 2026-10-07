@@ -8,7 +8,6 @@
 只需输入 provider + api_key，其余参数自动从预设补齐。
 """
 
-import os
 from pathlib import Path
 
 from config import PROVIDER_PRESETS
@@ -25,7 +24,7 @@ _PROVIDER_DISPLAY = {
 
 # 每个厂商的常用模型列表
 _COMMON_MODELS = {
-    "deepseek":  ["deepseek-chat", "deepseek-reasoner"],
+    "deepseek":  ["deepseek-flash", "deepseek-v4-pro"],
     "openai":    ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
     "qwen":      ["qwen-plus", "qwen-max", "qwen-turbo"],
     "glm":       ["glm-4-plus", "glm-4-flash", "glm-4-long"],
@@ -69,7 +68,10 @@ def _write_env(vars: dict[str, str]):
     lines = []
     sections = {
         "一、LLM 连接（自动生成）": ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL"],
-        "二、LLM 行为参数":         ["LLM_TEMPERATURE", "LLM_MAX_TOKENS"],
+        "二、LLM 行为参数":         [
+            "LLM_TEMPERATURE", "LLM_MAX_TOKENS", "LLM_REQUEST_TIMEOUT",
+            "LLM_MAX_RETRIES", "LLM_MAX_AGENT_STEPS",
+        ],
         "三、上下文管理":           ["LLM_CONTEXT_WINDOW", "LLM_COMPRESSION_RATIO"],
     }
 
@@ -173,7 +175,11 @@ def run_setup():
 
     print()
 
-    default_idx = _PROVIDER_KEYS.index(cur_provider) + 1 if cur_provider in _PROVIDER_KEYS else 1
+    default_idx = (
+        _PROVIDER_KEYS.index(cur_provider) + 1
+        if cur_provider in _PROVIDER_KEYS
+        else len(_PROVIDER_KEYS) + 1 if cur_provider == "custom" else 1
+    )
     choice = _prompt("请输入编号", str(default_idx))
 
     if not choice.isdigit():
@@ -188,7 +194,7 @@ def run_setup():
     # ════════════════ 第 2 步：选择模型 ════════════════
 
     preset = PROVIDER_PRESETS.get(provider, {})
-    default_model = preset.get("default_model", "deepseek-chat")
+    default_model = preset.get("default_model", "")
 
     print()
     print("  ─── 选择模型 ───")
@@ -201,14 +207,13 @@ def run_setup():
         for i, m in enumerate(common, 1):
             mark = " ← 推荐" if m == default_model else ""
             print(f"    [{i}] {m}{mark}")
-        if not cur_model or cur_model == default_model:
-            print(f"    [m] 手动输入其他模型名")
+        print("    [m] 手动输入其他模型名")
 
-    model_default = cur_model or default_model
+    model_default = cur_model if provider == cur_provider and cur_model else default_model
     print()
 
     if provider != "custom":
-        model_choice = _prompt("选择模型 (编号/m/回车=推荐)", str(default_model))
+        model_choice = _prompt("选择模型 (编号/m/回车=当前或推荐)", model_default)
         if model_choice.isdigit():
             mi = int(model_choice) - 1
             if 0 <= mi < len(_COMMON_MODELS.get(provider, [default_model])):
@@ -217,31 +222,55 @@ def run_setup():
                 model = default_model
         elif model_choice.lower() == "m":
             model = _prompt("请输入模型名称", default_model)
-        elif model_choice == str(default_model):
-            model = model_default
         else:
             model = model_choice if model_choice else model_default
     else:
         model = _prompt("模型名称", model_default)
+
+    if not model:
+        print("  ❌ 模型名称不能为空\n")
+        return
 
     # ════════════════ 第 3 步：API Key ════════════════
 
     print()
     if provider == "ollama":
         print("  Ollama 本地部署无需 API Key")
-        api_key = ""
+        api_key = "ollama"
     else:
         name, host = _PROVIDER_DISPLAY.get(provider, (provider, ""))
         print(f"  {name} ({host})")
-        default_display = _masked(cur_api_key) if cur_api_key else ""
+        existing_api_key = cur_api_key if provider == cur_provider else ""
+        default_display = _masked(existing_api_key) if existing_api_key else ""
         api_key = _prompt("API Key", default_display) if default_display else _prompt("API Key")
         if api_key == default_display:
-            api_key = cur_api_key  # 用户没改
+            api_key = existing_api_key  # 用户没改
+        if not api_key:
+            print("  ❌ API Key 不能为空\n")
+            return
 
     # ════════════════ 第 4 步：确认 — 自动补齐参数 ════
 
-    default_base_url = preset.get("base_url", "https://api.deepseek.com/v1")
-    default_context = preset.get("context_window", 65536)
+    if provider == "custom":
+        old_base_url = old.get("LLM_BASE_URL", "") if cur_provider == "custom" else ""
+        base_url = _prompt("OpenAI 兼容接口地址", old_base_url)
+        if not base_url.startswith(("http://", "https://")):
+            print("  ❌ 接口地址必须以 http:// 或 https:// 开头\n")
+            return
+        old_context = old.get("LLM_CONTEXT_WINDOW", "65536")
+        context_text = _prompt("模型上下文窗口", old_context)
+        try:
+            context_window = int(context_text)
+            if context_window <= 0:
+                raise ValueError
+        except ValueError:
+            print("  ❌ 上下文窗口必须是正整数\n")
+            return
+    else:
+        base_url = preset["base_url"]
+        context_window = preset["context_window"]
+
+    temperature = preset.get("default_temperature", 0.2)
 
     print()
     print("  ─── 汇总确认 ───")
@@ -249,10 +278,10 @@ def run_setup():
     if api_key:
         print(f"    LLM_API_KEY           = {_masked(api_key)}")
     print(f"    LLM_MODEL             = {model}")
-    print(f"    LLM_BASE_URL          = {default_base_url}    (自动补齐)")
-    print(f"    LLM_TEMPERATURE       = 0.7                (默认)")
+    print(f"    LLM_BASE_URL          = {base_url}")
+    print(f"    LLM_TEMPERATURE       = {temperature}                (默认)")
     print(f"    LLM_MAX_TOKENS        = 4096               (默认)")
-    print(f"    LLM_CONTEXT_WINDOW    = {default_context}   (自动补齐)")
+    print(f"    LLM_CONTEXT_WINDOW    = {context_window}")
     print(f"    LLM_COMPRESSION_RATIO = 0.6                (默认)")
 
     print()
@@ -265,10 +294,13 @@ def run_setup():
         "LLM_PROVIDER":          provider,
         "LLM_API_KEY":           api_key,
         "LLM_MODEL":             model,
-        "LLM_BASE_URL":          default_base_url,
-        "LLM_TEMPERATURE":       "0.7",
+        "LLM_BASE_URL":          base_url,
+        "LLM_TEMPERATURE":       str(temperature),
         "LLM_MAX_TOKENS":        "4096",
-        "LLM_CONTEXT_WINDOW":    str(default_context),
+        "LLM_REQUEST_TIMEOUT":   "60",
+        "LLM_MAX_RETRIES":       "2",
+        "LLM_MAX_AGENT_STEPS":   "16",
+        "LLM_CONTEXT_WINDOW":    str(context_window),
         "LLM_COMPRESSION_RATIO": "0.6",
     })
 
@@ -278,10 +310,10 @@ def run_setup():
     # ════════════════ 可选：测试连接 ════════════════
 
     print()
-    if api_key and provider != "custom":
+    if api_key:
         test_choice = _prompt("是否测试 API 连接？[y/N]", "N")
         if test_choice.lower() in ("y", "yes"):
-            _test_connection(provider, api_key, default_model, default_base_url)
+            _test_connection(provider, api_key, model, base_url)
 
     print()
     print(f"  使用 'a-stock chat' 开始对话\n")

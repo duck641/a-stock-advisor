@@ -16,16 +16,20 @@ services:
   # ─── Web 前端（浏览器访问 localhost:8000）───
   web:
     build: .
-    user: "1001:1001"
     command: python3 wechat/server.py
     ports:
-      - "8000:8000"
+      # 只发布到宿主机回环地址，局域网设备无法直接访问无登录的 Web UI。
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./cron/reports:/app/cron/reports
     env_file:
       - .env
+    environment:
+      - TZ=Asia/Shanghai
+      # 容器内需监听所有接口，外部访问范围由上面的 127.0.0.1 端口绑定限制。
+      - A_STOCK_WEB_HOST=0.0.0.0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
@@ -36,7 +40,6 @@ services:
   # ─── 定时日报（每天 09:00 生成板块分析）───
   cron:
     build: .
-    user: "1001:1001"
     command: python3 cron/cron.py
     volumes:
       - ./data:/app/data
@@ -44,4 +47,6 @@ services:
       - ./cron/reports:/app/cron/reports
     env_file:
       - .env
+    environment:
+      - TZ=Asia/Shanghai
     restart: unless-stopped

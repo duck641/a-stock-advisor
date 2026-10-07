@@ -17,6 +17,7 @@ import re
 import time
 import logging
 import concurrent.futures
+import multiprocessing
 from langchain_core.messages import ToolMessage
 
 from tools.core.error_handler import (
@@ -27,6 +28,94 @@ from tools.core.error_handler import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 美股上下文会串行获取多个指数和ETF，给它更长的硬超时；其他工具维持30秒。
+TOOL_TIMEOUTS = {"get_us_market_context": 60}
+
+# 这些工具主要依赖的外部网站。执行前只探测主站是否可连接，不检查本地依赖。
+NETWORK_CHECK_URLS = {
+    "select_signal_stock": "https://finance.sina.com.cn/",
+    "get_realtime_quote": "https://hq.sinajs.cn/",
+    "get_fundamental_info": "https://finance.sina.com.cn/",
+    "get_technical_info": "https://qt.gtimg.cn/",
+    "get_stock_daily_history": "https://qt.gtimg.cn/",
+    "get_stock_history_intraday": "https://finance.sina.com.cn/",
+    "get_market_sentiment": "https://finance.sina.com.cn/",
+    "get_market_environment": "https://finance.sina.com.cn/",
+    "get_us_market_context": "https://finance.sina.com.cn/",
+    # 财联社工具的首个正文请求本身就是连通性检查，并受10秒总预算控制；
+    # 此处不再重复请求同一页面，避免 Windows 子进程启动前浪费一次网络等待。
+    "get_investment_calendar": "https://www.cls.cn/",
+    "get_futures_market": "https://finance.sina.com.cn/",
+    "get_sector_rankings": "https://finance.sina.com.cn/",
+    "get_sector_leaders": "https://finance.sina.com.cn/",
+    "get_sector_history": "https://www.10jqka.com.cn/",
+    "get_dragon_tiger_list": "https://finance.sina.com.cn/",
+    "complete_stock_info": "https://finance.sina.com.cn/",
+}
+
+
+def _network_preflight(tool_name: str) -> str | None:
+    """联网工具执行前快速确认其主要数据网站可连接；失败时返回提示并跳过工具。"""
+    url = NETWORK_CHECK_URLS.get(tool_name)
+    if not url:
+        return None
+
+    try:
+        import requests
+
+        # stream=True 只读取响应头，避免为连通性检查下载整页内容。
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=3,
+            stream=True,
+        )
+        response.close()
+        return None
+    except Exception as exc:
+        return (
+            f"网络预检失败：当前无法连接 {url}，已跳过工具 {tool_name}。"
+            f"原因：{type(exc).__name__}: {exc}"
+        )
+
+
+def _tool_process_worker(tool_name: str, tool_args: dict, tool_call_id: str, send_conn):
+    """子进程入口：按名称重新加载工具并把可序列化结果发回父进程。"""
+    try:
+        # StructuredTool 内含动态 Pydantic 类型，Windows spawn 无法直接 pickle，
+        # 因此子进程按名称重建工具表，而不是从父进程传递工具对象。
+        from tools import TOOLS
+
+        tool = next((item for item in TOOLS if item.name == tool_name), None)
+        if tool is None:
+            raise LookupError(f"未找到工具: {tool_name}")
+
+        success, content, error = execute_with_error_handling(
+            tool_func=tool,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_call_id=tool_call_id,
+        )
+        result = content if success else format_error_for_llm(error)
+        send_conn.send(("result", result))
+    except BaseException as exc:
+        # 子进程异常也转换成普通文本，避免异常对象本身不可序列化。
+        send_conn.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        send_conn.close()
+
+
+def _stop_process(process) -> None:
+    """终止超时进程并等待资源回收，防止后台任务继续占用连接和 CPU。"""
+    if not process.is_alive():
+        process.join()
+        return
+    process.terminate()
+    process.join(timeout=2)
+    if process.is_alive() and hasattr(process, "kill"):
+        process.kill()
+        process.join()
 
 
 # ════════════════════════════════════════════════
@@ -168,7 +257,8 @@ def concurrent_tool_node(tools: list):
 
     # ── 单个工具执行 ─────────────────────────────
 
-    def _execute_tool(tc, timeout: int = 30) -> ToolMessage:
+    def _execute_tool(tc, timeout: int | None = None) -> ToolMessage:
+        timeout = timeout or TOOL_TIMEOUTS.get(tc["name"], 30)
         tool = tool_map.get(tc["name"])
         if not tool:
             return ToolMessage(
@@ -184,26 +274,36 @@ def concurrent_tool_node(tools: list):
                 tool_call_id=tc["id"],
             )
 
-        def _run() -> ToolMessage:
-            success, content, error = execute_with_error_handling(
-                tool_func=tool,
-                tool_name=tc["name"],
-                tool_args=tc["args"],
-                tool_call_id=tc["id"],
-            )
-            if success:
-                return ToolMessage(content=content, tool_call_id=tc["id"])
-            else:
-                return ToolMessage(
-                    content=format_error_for_llm(error),
-                    tool_call_id=tc["id"],
-                )
+        # 预检不通过时直接把原因交给模型，不启动工具子进程，也不重复重试探测。
+        preflight_error = _network_preflight(tc["name"])
+        if preflight_error:
+            return ToolMessage(content=preflight_error, tool_call_id=tc["id"])
 
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(_run)
+        # Thread 的 timeout 只能停止等待，不能停止正在运行的函数。独立进程
+        # 可以在超时后被真正终止，从而不会逐次耗尽后台线程和网络连接。
+        ctx = multiprocessing.get_context("spawn")
+        recv_conn, send_conn = ctx.Pipe(duplex=False)
+        process = ctx.Process(
+            target=_tool_process_worker,
+            args=(tc["name"], tc["args"], tc["id"], send_conn),
+            daemon=True,
+            name=f"a-stock-tool-{tc['name']}",
+        )
         try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
+            process.start()
+            send_conn.close()
+            process.join(timeout=timeout)
+            if process.is_alive():
+                _stop_process(process)
+                raise TimeoutError
+
+            if recv_conn.poll():
+                status, content = recv_conn.recv()
+                if status == "result":
+                    return ToolMessage(content=content, tool_call_id=tc["id"])
+                raise RuntimeError(content)
+            raise RuntimeError(f"工具子进程异常退出（exit code: {process.exitcode}）")
+        except TimeoutError:
             logger.warning("%s 超过 %ds 无响应", tc['name'], timeout)
             return ToolMessage(
                 content=format_error_for_llm(
@@ -217,8 +317,24 @@ def concurrent_tool_node(tools: list):
                 ),
                 tool_call_id=tc["id"],
             )
+        except Exception as exc:
+            logger.exception("工具 %s 的子进程执行失败", tc["name"])
+            return ToolMessage(
+                content=format_error_for_llm(
+                    ToolError(
+                        category=ErrorCategory.RETRYABLE,
+                        message=f"工具 {tc['name']} 执行失败：{exc}",
+                        tool_name=tc["name"],
+                        tool_args=tc["args"],
+                        tool_call_id=tc["id"],
+                    )
+                ),
+                tool_call_id=tc["id"],
+            )
         finally:
-            pool.shutdown(wait=False)
+            if process.is_alive():
+                _stop_process(process)
+            recv_conn.close()
 
     # ── 主节点函数 ───────────────────────────────
 

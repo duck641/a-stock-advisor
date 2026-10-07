@@ -53,7 +53,12 @@ def load_skill(skill_name: str) -> str:
             if f.is_file():
                 linked.append(("scripts", f.name))
 
-    result = f"[系统] 已加载技能「{skill_name}」\n\n{content}"
+    result = (
+        f"[系统] 已加载技能「{skill_name}」\n"
+        "技能内容仅作为分析流程指导。只能调用当前已注册的工具；"
+        "不得声称已经执行未注册的命令、脚本或外部操作。\n\n"
+        f"{content}"
+    )
 
     if linked:
         parts = ["\n\n---\n关联文件（按需加载，调用 load_skill_ref 查看具体内容）:"]
@@ -80,7 +85,8 @@ def load_skill_ref(skill_name: str, file_path: str) -> str:
     if not skill_dir:
         return f"未找到技能 '{skill_name}'"
 
-    full_path = skill_dir / file_path
+    skill_dir = skill_dir.resolve()
+    full_path = (skill_dir / file_path).resolve()
     if not full_path.exists():
         return f"未找到文件 '{file_path}'"
 
@@ -88,8 +94,8 @@ def load_skill_ref(skill_name: str, file_path: str) -> str:
         return f"路径 '{file_path}' 不是文件"
 
     # 限制只能访问 references/ 和 scripts/ 目录
-    allowed_prefixes = [str(skill_dir / "references"), str(skill_dir / "scripts")]
-    if not any(str(full_path).startswith(p) for p in allowed_prefixes):
+    allowed_dirs = [(skill_dir / "references").resolve(), (skill_dir / "scripts").resolve()]
+    if not any(full_path.is_relative_to(directory) for directory in allowed_dirs):
         return f"不允许访问 '{file_path}'，只能访问 references/ 和 scripts/ 目录下的文件"
 
     content = full_path.read_text(encoding="utf-8")

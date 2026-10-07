@@ -38,6 +38,21 @@ def get_stock_info(stock_num: str) -> str:
         return "bj" + code_str
     return None
 
+
+def _number_or_none(value):
+    """把上游数值安全转成 float；空值和 NaN 保持为 None。"""
+    if value is None or pd.isna(value):
+        return None
+    try:
+        return float(str(value).replace(",", "").replace("%", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _percent_or_none(value):
+    number = _number_or_none(value)
+    return f"{number:.2f}%" if number is not None else None
+
 # ════════════════════════════════════════════════
 # 工具1：日内分时数据
 # ════════════════════════════════════════════════
@@ -158,21 +173,21 @@ def get_fundamental_info(stock_num: str) -> dict:
         if not df_fin.empty:
             latest = df_fin.iloc[-1]
             result["盈利能力"] = {
-                "每股收益": float(latest.get("摊薄每股收益(元)", "N/A")) if isinstance(latest.get("摊薄每股收益(元)"), (int, float)) else str(latest.get("摊薄每股收益(元)", "N/A")),
-                "净资产收益率": f"{float(latest.get('净资产收益率(%)', 0)):.2f}%",
-                "销售净利率": f"{float(latest.get('销售净利率(%)', 0)):.2f}%",
-                "主营业务利润率": f"{float(latest.get('主营业务利润率(%)', 0)):.2f}%",
+                "每股收益": _number_or_none(latest.get("摊薄每股收益(元)")),
+                "净资产收益率": _percent_or_none(latest.get("净资产收益率(%)")),
+                "销售净利率": _percent_or_none(latest.get("销售净利率(%)")),
+                "主营业务利润率": _percent_or_none(latest.get("主营业务利润率(%)")),
             }
             result["盈利成长性"] = {
-                "主营业务收入增长率": f"{float(latest.get('主营业务收入增长率(%)', 0)):.2f}%",
-                "净利润增长率": f"{float(latest.get('净利润增长率(%)', 0)):.2f}%",
+                "主营业务收入增长率": _percent_or_none(latest.get("主营业务收入增长率(%)")),
+                "净利润增长率": _percent_or_none(latest.get("净利润增长率(%)")),
             }
             result["财务状况"] = {
-                "每股净资产": float(latest.get("每股净资产_调整前(元)", 0)),
-                "每股经营性现金流": float(latest.get("每股经营性现金流(元)", 0)),
-                "资产负债率": f"{float(latest.get('资产负债率(%)', 0)):.2f}%",
-                "流动比率": float(latest.get("流动比率", 0)),
-                "速动比率": float(latest.get("速动比率", 0)),
+                "每股净资产": _number_or_none(latest.get("每股净资产_调整前(元)")),
+                "每股经营性现金流": _number_or_none(latest.get("每股经营性现金流(元)")),
+                "资产负债率": _percent_or_none(latest.get("资产负债率(%)")),
+                "流动比率": _number_or_none(latest.get("流动比率")),
+                "速动比率": _number_or_none(latest.get("速动比率")),
             }
     except Exception as e:
         result["财务分析_错误"] = str(e)
@@ -186,9 +201,10 @@ def get_fundamental_info(stock_num: str) -> dict:
             for col in df_val.columns:
                 if col not in ["日期", "股票代码"]:
                     try:
-                        result["估值指标"][col] = float(latest_val[col]) if isinstance(latest_val[col], (int, float)) else str(latest_val[col])
+                        value = _number_or_none(latest_val[col])
+                        result["估值指标"][col] = value if value is not None else None
                     except (ValueError, TypeError):
-                        result["估值指标"][col] = str(latest_val[col])
+                        result["估值指标"][col] = None
     except Exception as e:
         try:
             # 备用：获取主营业务构成
@@ -199,6 +215,21 @@ def get_fundamental_info(stock_num: str) -> dict:
         except Exception:
             pass
 
+    # 明确告诉评分工具哪些字段没有拿到，避免把缺失值误当成真实的 0。
+    expected_fields = {
+        "盈利能力": ["净资产收益率", "销售净利率"],
+        "盈利成长性": ["主营业务收入增长率", "净利润增长率"],
+        "财务状况": ["资产负债率", "流动比率"],
+        "估值指标": ["市盈率", "市净率", "市销率"],
+    }
+    missing = [
+        f"{section}.{field}"
+        for section, fields in expected_fields.items()
+        for field in fields
+        if result.get(section, {}).get(field) is None
+    ]
+    result["数据状态"] = "完整" if not missing else "部分缺失"
+    result["缺失数据"] = missing
     return result
 
 
@@ -282,14 +313,34 @@ def get_technical_info(stock_num: str) -> dict:
 
     rsi_signal = "超买(考虑卖出)" if rsi > 70 else "超卖(考虑买入)" if rsi < 30 else "中性"
 
-    # MACD
+    # MACD：金叉/死叉描述的是两条线在相邻交易日之间发生了穿越，
+    # 不能只用当天 DIF、DEA 所在的正负区间来代替“交叉”。
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
-    dif = round((ema12 - ema26).iloc[-1], 4)
-    dea = round((ema12 - ema26).ewm(span=9, adjust=False).mean().iloc[-1], 4)
-    macd_val = round(2 * (dif - dea), 4)
+    dif_series = ema12 - ema26
+    dea_series = dif_series.ewm(span=9, adjust=False).mean()
+    current_dif = dif_series.iloc[-1]
+    current_dea = dea_series.iloc[-1]
+    dif = round(current_dif, 4)
+    dea = round(current_dea, 4)
+    macd_val = round(2 * (current_dif - current_dea), 4)
 
-    macd_signal = "金叉(买入信号)" if dif > dea and dif < 0 else "死叉(卖出信号)" if dif < dea and dif > 0 else "多头" if dif > 0 and dea > 0 else "空头" if dif < 0 and dea < 0 else "中性"
+    if len(dif_series) >= 2:
+        prev_dif = dif_series.iloc[-2]
+        prev_dea = dea_series.iloc[-2]
+        # 判断交叉使用未四舍五入的原值，避免极小但真实的穿越被抹平。
+        if prev_dif <= prev_dea and current_dif > current_dea:
+            macd_signal = "金叉(买入信号)"
+        elif prev_dif >= prev_dea and current_dif < current_dea:
+            macd_signal = "死叉(卖出信号)"
+        elif current_dif > current_dea:
+            macd_signal = "多头"
+        elif current_dif < current_dea:
+            macd_signal = "空头"
+        else:
+            macd_signal = "中性"
+    else:
+        macd_signal = "中性"
 
     # 布林带
     boll_mid = close.rolling(20).mean().iloc[-1]

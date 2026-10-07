@@ -21,7 +21,7 @@
 """
 
 import os
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,9 +36,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROVIDER_PRESETS: dict[str, dict] = {
     "deepseek": {
-        "default_model": "deepseek-chat",
+        "default_model": "deepseek-flash",
         "base_url": "https://api.deepseek.com/v1",
-        "context_window": 65536,
+        "context_window": 1_000_000,
+        "default_temperature": 0.2,
     },
     "openai": {
         "default_model": "gpt-4o",
@@ -78,7 +79,7 @@ class LLMConfig(BaseSettings):
       model         — 模型名称。留空则用 provider 的默认模型。
       api_key       — API 密钥（ollama 不需要）。
       base_url      — API 端点。留空则用 provider 的默认端点。
-      temperature   — 生成温度，默认 0.7。
+      temperature   — 生成温度，股票分析默认 0.2。
       max_tokens    — 单次最大输出 token 数，默认 4096。
       context_window — 模型上下文窗口大小，0 则用 provider 默认值。
       compression_ratio — token 占比阈值，触发历史压缩（默认 0.6）。
@@ -86,6 +87,7 @@ class LLMConfig(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(__file__), ".env"),
+        env_file_encoding="utf-8",
         env_prefix="LLM_",
         extra="ignore",
     )
@@ -97,12 +99,16 @@ class LLMConfig(BaseSettings):
     base_url: str = ""
 
     # ── 行为参数 ─────────────────────────────────────
-    temperature: float = 0.7
-    max_tokens: int = 4096
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    max_tokens: int = Field(default=4096, gt=0)
+    request_timeout: float = Field(default=60, gt=0)
+    max_retries: int = Field(default=2, ge=0, le=10)
+    # LangGraph 图节点最大执行步数；工具轮数会为最终回答预留空间。
+    max_agent_steps: int = Field(default=16, ge=4, le=100)
 
     # ── 上下文管理 ──────────────────────────────────
-    context_window: int = 0
-    compression_ratio: float = 0.6
+    context_window: int = Field(default=0, ge=0)
+    compression_ratio: float = Field(default=0.6, gt=0, lt=1)
 
     @model_validator(mode="after")
     def _apply_provider_preset(self):
@@ -111,16 +117,17 @@ class LLMConfig(BaseSettings):
         规则：显式填了的保留，没填的从预设补齐。
         不进预设的 provider（如 custom）不报错，保持原值。
         """
-        provider = self.provider
+        provider = self.provider.strip().lower()
+        self.provider = provider
 
         # provider 为空 → 完全手动模式（兼容旧版 .env）
         if not provider:
             if not self.model:
-                self.model = "deepseek-chat"
+                self.model = "deepseek-flash"
             if not self.base_url:
                 self.base_url = "https://api.deepseek.com/v1"
             if not self.context_window:
-                self.context_window = 65536
+                self.context_window = 1_000_000
             return self
 
         # provider 指定了但不在预设表中 → 用户可能用了自定义 provider 名

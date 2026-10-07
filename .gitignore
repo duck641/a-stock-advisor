@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv-windows/
+.uv-cache/
 venv/
 *.egg-info/
 *.egg

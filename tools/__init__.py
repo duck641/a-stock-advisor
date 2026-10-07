@@ -4,6 +4,7 @@
 分类：
   tools/stock/     — 个股数据（分时、实时、日线、基本面、技术面）
   tools/market/    — 市场环境（行业、情绪、大盘）
+  tools/futures/   — 期货行情、关键指标与增长判断
   tools/signal/    — 买卖信号
   tools/info/      — 信息补全（代码⇄名称）
   tools/core/      — 核心调度（并发、错误处理、工具管理）
@@ -23,6 +24,14 @@ from tools.stock import (
 from tools.market import (
     get_market_sentiment,
     get_market_environment,
+    get_us_market_context,
+    get_cls_morning_report,
+    get_project_daily_report,
+    get_sector_rotation_context,
+)
+
+from tools.futures import (
+    get_futures_market,
 )
 
 from tools.stock_board import (
@@ -56,6 +65,7 @@ from tools.core import (
     quick_call,
     summary,
     load_skill,
+    load_skill_ref,
     list_skills,
 )
 
@@ -74,6 +84,13 @@ TOOLS = [
     # 市场环境类
     get_market_sentiment,
     get_market_environment,
+    get_us_market_context,
+    # 报告按来源独立读取，再按需查询少量行业状态。
+    get_cls_morning_report,
+    get_project_daily_report,
+    get_sector_rotation_context,
+    # 期货行情、关键指标与增长判断
+    get_futures_market,
     # 板块历史走势
     get_sector_history,
     # 板块成分股
@@ -85,6 +102,7 @@ TOOLS = [
     complete_stock_info,
     # 技能管理
     load_skill,
+    load_skill_ref,
     list_skills,
     # 龙虎榜
     get_dragon_tiger_list,
